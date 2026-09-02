@@ -1,0 +1,13 @@
+# Copy to ~/.config/comfy-i2v-env/private-strings and fill in.
+# NEVER commit the filled-in file: it is a list of exactly the strings that must
+# not become public, so committing it would be the leak it prevents.
+#
+# One string per line. Matching is case-insensitive and substring-based.
+# Good candidates:
+#
+#   - the build machine's login name (leaks through /home paths and caches)
+#   - the machine's hostname
+#   - any real name
+#   - any personal email address
+#   - private repository or project names that should not be linked to this one
+#   - internal hostnames or LAN addresses

@@ -1,0 +1,4 @@
+# The build context is deliberately almost empty. Nothing from the working tree
+# should reach a layer: a public image must not carry local paths or usernames.
+*
+!scripts/

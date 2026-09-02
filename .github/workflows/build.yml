@@ -1,0 +1,66 @@
+name: build and publish
+
+# The image is built here rather than on a workstation or a rented GPU for three
+# reasons: Actions is free on a public repository, GHCR egress from Actions is
+# not metered, and the multi-architecture CUDA compile needs no GPU -- only nvcc.
+on:
+  push:
+    branches: [main]
+    paths: ['Dockerfile', 'pins.env', '.github/workflows/build.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A CUDA runtime plus torch does not fit in the default free space.
+      - name: reclaim disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          docker image prune -af
+          df -h /
+
+      - name: load pins
+        run: cat pins.env >> "$GITHUB_ENV"
+
+      - name: build
+        run: |
+          docker build \
+            --build-arg BASE_DEVEL="$BASE_DEVEL" \
+            --build-arg BASE_RUNTIME="$BASE_RUNTIME" \
+            --build-arg TORCH_CHANNEL="$TORCH_CHANNEL" \
+            --build-arg TORCH_VERSION="$TORCH_VERSION" \
+            --build-arg COMFYUI_REPO="$COMFYUI_REPO" \
+            --build-arg COMFYUI_SHA="$COMFYUI_SHA" \
+            -t local/comfy-i2v-env:candidate .
+
+      # The gate. A public image cannot be un-published, so the scan runs before
+      # the push, not after it, and a finding fails the job.
+      - name: scan for anything identifying
+        env:
+          PRIVATE_STRINGS_CONTENT: ${{ secrets.PRIVATE_STRINGS }}
+        run: |
+          mkdir -p ~/.config/comfy-i2v-env
+          printf '%s\n' "$PRIVATE_STRINGS_CONTENT" > ~/.config/comfy-i2v-env/private-strings
+          chmod 600 ~/.config/comfy-i2v-env/private-strings
+          ./tools/scan-image.sh local/comfy-i2v-env:candidate
+
+      - name: log in to ghcr
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: push
+        run: |
+          REF="ghcr.io/${{ github.repository_owner }}/comfy-i2v-env"
+          docker tag local/comfy-i2v-env:candidate "$REF:${COMFYUI_RELEASE}-${TORCH_CHANNEL}"
+          docker tag local/comfy-i2v-env:candidate "$REF:latest"
+          docker push "$REF:${COMFYUI_RELEASE}-${TORCH_CHANNEL}"
+          docker push "$REF:latest"
+          echo "published $REF:${COMFYUI_RELEASE}-${TORCH_CHANNEL}" >> "$GITHUB_STEP_SUMMARY"
