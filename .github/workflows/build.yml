@@ -29,7 +29,9 @@ jobs:
           df -h /
 
       - name: load pins
-        run: cat pins.env >> "$GITHUB_ENV"
+        # GITHUB_ENV takes NAME=value lines only -- it rejects the comments and
+        # blank lines that make pins.env readable, so filter to assignments.
+        run: grep -E '^[A-Z][A-Z0-9_]*=' pins.env >> "$GITHUB_ENV"
 
       - name: build
         run: |
