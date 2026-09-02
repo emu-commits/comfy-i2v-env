@@ -127,14 +127,22 @@ else
   # Restricted to the directories where a build leaks identity; the model and
   # library trees are far too large and are not where a username ends up.
   PATTERN="$(printf '%s\n' "${PRIV[@]}" | paste -sd'|' -)"
+  # A content scan that cannot run is not a content scan that passed. If the
+  # image has no shell, say so -- silence here would be the most dangerous
+  # possible result, since it looks exactly like a clean bill of health.
   HITS="$(docker run --rm --network none --entrypoint /bin/sh "$IMAGE" -c \
       "grep -rlEi --binary-files=without-match -- '$PATTERN' \
-         /root /home /etc /opt/ComfyUI 2>/dev/null | head -40" 2>/dev/null)"
-  if [ -n "$HITS" ]; then
+         /root /home /etc /opt/ComfyUI 2>/dev/null | head -40" 2>/tmp/scan-err.$$)"
+  RC=$?
+  if [ "$RC" -gt 1 ]; then
+    note "content scan could not run (no shell in image?) -- result is INCONCLUSIVE, not clean"
+    sed 's/^/          /' /tmp/scan-err.$$ | head -3
+  elif [ -n "$HITS" ]; then
     while IFS= read -r f; do note "a private string appears in file contents: $f"; done <<< "$HITS"
   else
     pass "no private strings in /root /home /etc /opt/ComfyUI"
   fi
+  rm -f /tmp/scan-err.$$
 fi
 
 echo
