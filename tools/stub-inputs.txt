@@ -1,0 +1,9 @@
+# Zero-byte placeholders staged into ComfyUI's input/ directory before the
+# schema is captured, for the same reason as tools/stub-models.txt: LoadVideo
+# and LoadImage build their choice lists by listing that directory, so a
+# recording made against an empty one cannot check a workflow that names a file.
+#
+# LoadVideo filters by mimetype, so the extension has to be a real video type;
+# .mkv resolves to video/x-matroska. Nothing is opened during enumeration.
+context.mkv
+masks.mkv

@@ -30,7 +30,7 @@ REQUIRED_NODES="UNETLoader CLIPLoader VAELoader LoraLoaderModelOnly
 
 cleanup() {
   docker rm -f "$NAME" >/dev/null 2>&1 || true
-  rm -rf "${STUBS:-}" 2>/dev/null || true
+  rm -rf "${STUBS:-}" "${INPUTS:-}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -47,9 +47,20 @@ while IFS= read -r rel; do
 done < "$(dirname "$0")/stub-models.txt"
 echo "staged $STUB_COUNT model placeholders"
 
+INPUTS="$(mktemp -d)"
+INPUT_COUNT=0
+while IFS= read -r rel; do
+  case "$rel" in ''|\#*) continue ;; esac
+  mkdir -p "$INPUTS/$(dirname "$rel")"
+  : > "$INPUTS/$rel"
+  INPUT_COUNT=$((INPUT_COUNT + 1))
+done < "$(dirname "$0")/stub-inputs.txt"
+echo "staged $INPUT_COUNT input placeholders"
+
 echo "starting $IMAGE on CPU..."
 docker run -d --name "$NAME" -p "127.0.0.1:${PORT}:${PORT}" \
-  -v "$STUBS:/opt/ComfyUI/models:ro" "$IMAGE" \
+  -v "$STUBS:/opt/ComfyUI/models:ro" \
+  -v "$INPUTS:/opt/ComfyUI/input:ro" "$IMAGE" \
   python main.py --cpu --listen 0.0.0.0 --port "$PORT" \
                  --disable-auto-launch --disable-metadata >/dev/null
 
@@ -99,11 +110,12 @@ for node, field, want in (
     ("UNETLoader", "unet_name", "fun_vace"),
     ("VAELoader", "vae_name", "wan_2.1_vae"),
     ("LoraLoaderModelOnly", "lora_name", "lightx2v"),
+    ("LoadVideo", "file", "context.mkv"),
 ):
     got = choices(node, field)
     if not any(want in str(c) for c in got):
         sys.exit(
-            f"FAIL: {node}.{field} does not list a {want} file; the model "
+            f"FAIL: {node}.{field} does not list a {want} file; the "
             f"placeholders did not reach the enumeration. Saw: {got}"
         )
 
@@ -112,3 +124,59 @@ print(f"ok: {len(info)} node classes, all {len(required)} required present, "
 PY
 
 echo "wrote $OUT ($(wc -c < "$OUT") bytes)"
+
+# ------------------------------------------------------------------------
+# Second use of the same container: put every workflow in workflows/ through
+# ComfyUI's own validator.
+#
+# There is no dry-run route. POST /prompt runs execution.validate_prompt and
+# only queues on success, so the response code is the verdict: 400 carries
+# node_errors naming the offending node and input, 200 means the graph is one
+# this build will accept. A 200 leaves a job queued against zero-byte weights,
+# which is why the run is interrupted immediately and the container discarded.
+#
+# This is the check worth having. It is the same code path that would reject a
+# graph on a rented GPU, running here for nothing.
+# ------------------------------------------------------------------------
+WORKFLOW_DIR="${WORKFLOW_DIR:-$(dirname "$0")/../workflows}"
+if [ -d "$WORKFLOW_DIR" ]; then
+  failed=0
+  checked=0
+  for wf in "$WORKFLOW_DIR"/*.json; do
+    [ -e "$wf" ] || continue
+    checked=$((checked + 1))
+    body="$(mktemp)"
+    python3 -c 'import json,sys; print(json.dumps({"prompt": json.load(open(sys.argv[1]))}))' \
+        "$wf" > "$body"
+    code=$(curl -s -o /tmp/validate-reply.json -w '%{http_code}' \
+           --max-time 60 -X POST -H 'Content-Type: application/json' \
+           --data-binary "@$body" "http://127.0.0.1:${PORT}/prompt" || echo 000)
+    rm -f "$body"
+    if [ "$code" = "200" ]; then
+      echo "ok: $(basename "$wf") accepted by validate_prompt"
+      curl -s -X POST "http://127.0.0.1:${PORT}/interrupt" >/dev/null || true
+    else
+      echo "FAIL: $(basename "$wf") rejected (HTTP $code)" >&2
+      python3 -c '
+import json,sys
+try:
+    d=json.load(open("/tmp/validate-reply.json"))
+except Exception:
+    print(open("/tmp/validate-reply.json").read()[:2000], file=sys.stderr); raise SystemExit
+err=d.get("error") or {}
+print(f"  {err.get(\"type\",\"?\")}: {err.get(\"message\",\"\")} {err.get(\"details\",\"\")}", file=sys.stderr)
+for node_id, ne in (d.get("node_errors") or {}).items():
+    print(f"  node {node_id} ({ne.get(\"class_type\",\"?\")}):", file=sys.stderr)
+    for e in ne.get("errors", []):
+        print(f"    - {e.get(\"message\")}: {e.get(\"details\")}", file=sys.stderr)
+' >&2
+      failed=$((failed + 1))
+    fi
+  done
+  if [ "$checked" -eq 0 ]; then
+    echo "FAIL: $WORKFLOW_DIR contains no workflows to validate" >&2
+    exit 1
+  fi
+  echo "validated $checked workflow(s), $failed rejected"
+  [ "$failed" -eq 0 ] || exit 1
+fi
