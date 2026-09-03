@@ -29,13 +29,27 @@ REQUIRED_NODES="UNETLoader CLIPLoader VAELoader LoraLoaderModelOnly
                 WanFirstLastFrameToVideo LoadImage SaveImage"
 
 cleanup() {
-  docker logs "$NAME" > /tmp/${NAME}.log 2>&1 || true
   docker rm -f "$NAME" >/dev/null 2>&1 || true
+  rm -rf "${STUBS:-}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
+# Loader nodes enumerate models/ to build their choice lists, so a schema
+# captured against an empty tree describes no real filename. Stub the files in
+# so the recording describes a provisioned host. See tools/stub-models.txt.
+STUBS="$(mktemp -d)"
+STUB_COUNT=0
+while IFS= read -r rel; do
+  case "$rel" in ''|\#*) continue ;; esac
+  mkdir -p "$STUBS/$(dirname "$rel")"
+  : > "$STUBS/$rel"
+  STUB_COUNT=$((STUB_COUNT + 1))
+done < "$(dirname "$0")/stub-models.txt"
+echo "staged $STUB_COUNT model placeholders"
+
 echo "starting $IMAGE on CPU..."
-docker run -d --name "$NAME" -p "127.0.0.1:${PORT}:${PORT}" "$IMAGE" \
+docker run -d --name "$NAME" -p "127.0.0.1:${PORT}:${PORT}" \
+  -v "$STUBS:/opt/ComfyUI/models:ro" "$IMAGE" \
   python main.py --cpu --listen 0.0.0.0 --port "$PORT" \
                  --disable-auto-launch --disable-metadata >/dev/null
 
@@ -67,7 +81,34 @@ if not isinstance(info, dict) or not info:
 missing = [n for n in required if n not in info]
 if missing:
     sys.exit(f"FAIL: image is missing required nodes: {', '.join(missing)}")
-print(f"ok: {len(info)} node classes, all {len(required)} required ones present")
+
+# The placeholders are only useful if they reached the enumeration. An empty
+# choice list here means the schema cannot check any workflow naming a weight,
+# and it would look exactly like a successful capture.
+def choices(node, field):
+    spec = info.get(node, {}).get("input", {}).get("required", {}).get(field)
+    if isinstance(spec, list) and spec:
+        head = spec[0]
+        if isinstance(head, list):
+            return head
+        if len(spec) > 1 and isinstance(spec[1], dict):
+            return spec[1].get("options") or []
+    return []
+
+for node, field, want in (
+    ("UNETLoader", "unet_name", "fun_vace"),
+    ("VAELoader", "vae_name", "wan_2.1_vae"),
+    ("LoraLoaderModelOnly", "lora_name", "lightx2v"),
+):
+    got = choices(node, field)
+    if not any(want in str(c) for c in got):
+        sys.exit(
+            f"FAIL: {node}.{field} does not list a {want} file; the model "
+            f"placeholders did not reach the enumeration. Saw: {got}"
+        )
+
+print(f"ok: {len(info)} node classes, all {len(required)} required present, "
+      "model enumerations populated")
 PY
 
 echo "wrote $OUT ($(wc -c < "$OUT") bytes)"

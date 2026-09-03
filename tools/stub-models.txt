@@ -1,0 +1,20 @@
+# Zero-byte placeholders created before the schema is captured.
+#
+# ComfyUI enumerates model directories to build the COMBO choices for loader
+# nodes, so an image with an empty models/ tree reports `vae_name` as having one
+# choice ("pixel_space") and every real filename as invalid. A schema recorded
+# that way cannot check any workflow that names a weight file.
+#
+# Enumeration is a directory listing filtered by extension -- nothing is read --
+# so an empty file is enough to make the recorded schema describe a provisioned
+# host. Loading one would fail, which is why this runs only for the capture.
+#
+# These are the Wan 2.2 A14B files this image exists to run.
+diffusion_models/wan2.2_fun_vace_high_noise_14B_fp8_scaled.safetensors
+diffusion_models/wan2.2_fun_vace_low_noise_14B_fp8_scaled.safetensors
+diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors
+diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors
+text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
+vae/wan_2.1_vae.safetensors
+loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors
+loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
