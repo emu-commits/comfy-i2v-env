@@ -38,9 +38,13 @@ SCAN_TIMEOUT="${SCAN_TIMEOUT:-120}"
 OUT="$(mktemp)"; trap 'rm -f "$OUT"' EXIT
 docker_bounded() {   # docker_bounded <seconds> <args...>; stdout lands in $OUT
   local secs="$1"; shift
-  # Subshell so that bash reports the SIGKILL to itself, not to the terminal:
-  # a bare "Killed" line in the middle of a report reads like a crash.
-  ( timeout -k 5 "$secs" docker "$@" >"$OUT" 2>/dev/null ) 2>/dev/null
+  # Run under an inner shell whose stderr we control. A signalled foreground
+  # child is announced by the shell that reaped it, on *its own* stderr, so a
+  # subshell redirect does not catch it -- and a bare "Killed" line in the
+  # middle of a security report reads like the tool crashed rather than like
+  # the timeout doing its job.
+  SCAN_OUT="$OUT" bash -c 'timeout -k 5 "$1" docker "${@:2}" >"$SCAN_OUT" 2>/dev/null' \
+      _ "$secs" "$@" 2>/dev/null
 }
 
 # Load private strings into an array; they are never printed, only indexed.
