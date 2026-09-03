@@ -157,19 +157,13 @@ if [ -d "$WORKFLOW_DIR" ]; then
       curl -s -X POST "http://127.0.0.1:${PORT}/interrupt" >/dev/null || true
     else
       echo "FAIL: $(basename "$wf") rejected (HTTP $code)" >&2
-      python3 -c '
-import json,sys
-try:
-    d=json.load(open("/tmp/validate-reply.json"))
-except Exception:
-    print(open("/tmp/validate-reply.json").read()[:2000], file=sys.stderr); raise SystemExit
-err=d.get("error") or {}
-print(f"  {err.get(\"type\",\"?\")}: {err.get(\"message\",\"\")} {err.get(\"details\",\"\")}", file=sys.stderr)
-for node_id, ne in (d.get("node_errors") or {}).items():
-    print(f"  node {node_id} ({ne.get(\"class_type\",\"?\")}):", file=sys.stderr)
-    for e in ne.get("errors", []):
-        print(f"    - {e.get(\"message\")}: {e.get(\"details\")}", file=sys.stderr)
-' >&2
+      # Print the reply verbatim. An earlier version formatted it with inline
+      # python and the nested quoting was a syntax error, so the one thing this
+      # branch exists to say -- why the graph was rejected -- was the one thing
+      # it could not say. Formatting is not worth a second failure mode.
+      python3 -m json.tool < /tmp/validate-reply.json >&2 2>/dev/null \
+        || cat /tmp/validate-reply.json >&2
+      echo >&2
       failed=$((failed + 1))
     fi
   done
