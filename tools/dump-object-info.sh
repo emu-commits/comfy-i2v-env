@@ -58,11 +58,16 @@ done < "$(dirname "$0")/stub-inputs.txt"
 echo "staged $INPUT_COUNT input placeholders"
 
 echo "starting $IMAGE on CPU..."
+# models/ is empty in the image, so mounting over it loses nothing. input/ is
+# NOT empty -- ComfyUI ships example.png, and LoadImage's choices come from that
+# directory -- so the placeholders are copied in rather than mounted over. A
+# mount there silently deletes a file every stock workflow refers to.
 docker run -d --name "$NAME" -p "127.0.0.1:${PORT}:${PORT}" \
   -v "$STUBS:/opt/ComfyUI/models:ro" \
-  -v "$INPUTS:/opt/ComfyUI/input:ro" "$IMAGE" \
-  python main.py --cpu --listen 0.0.0.0 --port "$PORT" \
-                 --disable-auto-launch --disable-metadata >/dev/null
+  -v "$INPUTS:/opt/stub-inputs:ro" "$IMAGE" \
+  sh -c "cp -n /opt/stub-inputs/* /opt/ComfyUI/input/ 2>/dev/null; \
+         exec python main.py --cpu --listen 0.0.0.0 --port ${PORT} \
+              --disable-auto-launch --disable-metadata" >/dev/null
 
 deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
 until curl -fsS --max-time 10 "http://127.0.0.1:${PORT}/object_info" -o "$OUT" 2>/dev/null; do
@@ -111,6 +116,10 @@ for node, field, want in (
     ("VAELoader", "vae_name", "wan_2.1_vae"),
     ("LoraLoaderModelOnly", "lora_name", "lightx2v"),
     ("LoadVideo", "file", "context.mkv"),
+    # Shipped with the image, not staged. Listed here because the placeholders
+    # were originally mounted over input/, which deleted it -- and the only
+    # symptom was a workflow rejected for naming a file that had been there.
+    ("LoadImage", "image", "example.png"),
 ):
     got = choices(node, field)
     if not any(want in str(c) for c in got):
