@@ -6,7 +6,7 @@ name: build and publish
 on:
   push:
     branches: [main]
-    paths: ['Dockerfile', 'pins.env', '.github/workflows/build.yml']
+    paths: ['Dockerfile', 'pins.env', 'tools/**', '.github/workflows/build.yml']
   workflow_dispatch:
 
 permissions:

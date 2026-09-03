@@ -47,6 +47,22 @@ docker_bounded() {   # docker_bounded <seconds> <args...>; stdout lands in $OUT
       _ "$secs" "$@" 2>/dev/null
 }
 
+# Whether the check RAN is a separate question from what it found, and grep's
+# exit status cannot answer it: grep returns 2 both when it could not start and
+# when it merely met an unreadable file, which a trust store full of dangling
+# symlinks guarantees. So the snippet prints a sentinel as its last act, and the
+# presence of that line -- not an exit code -- is what proves the check happened.
+SENTINEL="__SCAN_COMPLETED__"
+run_in_image() {   # run_in_image <seconds> <sh-snippet>; findings land in $OUT
+  docker_bounded "$1" run --rm --network none --entrypoint /bin/sh "$IMAGE" \
+      -c "$2; echo $SENTINEL"
+  if grep -qx "$SENTINEL" "$OUT" 2>/dev/null; then
+    sed -i "/^${SENTINEL}\$/d" "$OUT"
+    return 0
+  fi
+  return 1
+}
+
 # Load private strings into an array; they are never printed, only indexed.
 declare -a PRIV=()
 if [ -r "$PRIVATE_STRINGS" ]; then
@@ -134,16 +150,18 @@ if [ -z "$CANDIDATES" ]; then
 else
   N=$(printf '%s\n' "$CANDIDATES" | wc -l)
   FILES="$(printf '%s\n' "$CANDIDATES" | sed 's|^|/|' | tr '\n' ' ')"
-  docker_bounded "$SCAN_TIMEOUT" run --rm --network none --entrypoint /bin/sh "$IMAGE" -c \
-      "grep -lE -- '-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----' $FILES 2>/dev/null"
-  RC=$?
-  PRIVKEYS="$(cat "$OUT")"
-  if [ "$RC" -gt 1 ]; then
-    note "could not read $N .pem/.key files (rc=$RC) -- INCONCLUSIVE, not clean"
-  elif [ -n "$PRIVKEYS" ]; then
-    while IFS= read -r f; do note "PRIVATE KEY material in image: $f"; done <<< "$PRIVKEYS"
+  # -f skips the dangling symlinks a trust store is full of: they are not files,
+  # and their absence says nothing about whether the image carries a key.
+  if run_in_image "$SCAN_TIMEOUT" \
+      "for f in $FILES; do [ -f \"\$f\" ] || continue; grep -lE -- '-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----' \"\$f\" 2>/dev/null; done"; then
+    PRIVKEYS="$(cat "$OUT")"
+    if [ -n "$PRIVKEYS" ]; then
+      while IFS= read -r f; do note "PRIVATE KEY material in image: $f"; done <<< "$PRIVKEYS"
+    else
+      pass "$N .pem/.key files present, none contain private key material"
+    fi
   else
-    pass "$N .pem/.key files present, none contain private key material"
+    note "could not inspect $N .pem/.key files -- INCONCLUSIVE, not clean"
   fi
 fi
 
@@ -165,20 +183,16 @@ else
   # Restricted to the directories where a build leaks identity; the model and
   # library trees are far too large and are not where a username ends up.
   PATTERN="$(printf '%s\n' "${PRIV[@]}" | paste -sd'|' -)"
-  # A content scan that cannot run is not a content scan that passed. If the
-  # image has no shell, say so -- silence here would be the most dangerous
-  # possible result, since it looks exactly like a clean bill of health.
-  docker_bounded "$SCAN_TIMEOUT" run --rm --network none --entrypoint /bin/sh "$IMAGE" -c \
-      "grep -rlEi --binary-files=without-match -- '$PATTERN' \
-         /root /home /etc /opt/ComfyUI 2>/dev/null | head -40"
-  RC=$?
-  HITS="$(cat "$OUT")"
-  if [ "$RC" -gt 1 ]; then
-    note "content scan could not run (rc=$RC: no shell, or Docker cannot start containers) -- INCONCLUSIVE, not clean"
-  elif [ -n "$HITS" ]; then
-    while IFS= read -r f; do note "a private string appears in file contents: $f"; done <<< "$HITS"
+  if run_in_image "$SCAN_TIMEOUT" \
+      "grep -rlEi --binary-files=without-match -- '$PATTERN' /root /home /etc /opt/ComfyUI 2>/dev/null | head -40"; then
+    HITS="$(cat "$OUT")"
+    if [ -n "$HITS" ]; then
+      while IFS= read -r f; do note "a private string appears in file contents: $f"; done <<< "$HITS"
+    else
+      pass "no private strings in /root /home /etc /opt/ComfyUI"
+    fi
   else
-    pass "no private strings in /root /home /etc /opt/ComfyUI"
+    note "content scan could not run -- INCONCLUSIVE, not clean"
   fi
 fi
 
