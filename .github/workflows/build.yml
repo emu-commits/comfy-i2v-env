@@ -65,6 +65,32 @@ jobs:
           fi
           ./tools/scan-image.sh local/comfy-i2v-env:candidate
 
+      # A second gate, and a different kind from the scan above. The scan asks
+      # whether the image is safe to publish; this asks whether it works at all.
+      # ComfyUI booting and serving its own node schema is the cheapest proof
+      # that the pins resolved to something that runs -- no GPU, no weights, no
+      # rented hardware. The schema is also the ground truth any workflow has to
+      # be checked against, so it is published as an artifact.
+      - name: boot on CPU and capture the node schema
+        run: ./tools/dump-object-info.sh local/comfy-i2v-env:candidate object-info.json
+
+      - name: record what produced the schema
+        run: |
+          {
+            echo "### Node schema"
+            echo ""
+            echo "- classes: $(python3 -c 'import json;print(len(json.load(open("object-info.json"))))')"
+            echo "- sha256: $(sha256sum object-info.json | cut -d' ' -f1)"
+            echo "- ComfyUI: ${COMFYUI_RELEASE} (${COMFYUI_SHA})"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: object-info
+          path: |
+            object-info.json
+            object-info-system.json
+
       - name: log in to ghcr
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
