@@ -30,6 +30,19 @@ FINDINGS=0
 note() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FINDINGS=$((FINDINGS+1)); }
 pass() { printf '  \033[32mok\033[0m    %s\n' "$1"; }
 
+# Every call below that needs a container to START is bounded. A wedged Docker
+# does not refuse -- it blocks, and a plain $(...) waits on the pipe even after
+# timeout has killed the client, so the gate hangs instead of reporting. -k
+# follows up with SIGKILL, and the output goes to a file rather than a pipe.
+SCAN_TIMEOUT="${SCAN_TIMEOUT:-120}"
+OUT="$(mktemp)"; trap 'rm -f "$OUT"' EXIT
+docker_bounded() {   # docker_bounded <seconds> <args...>; stdout lands in $OUT
+  local secs="$1"; shift
+  # Subshell so that bash reports the SIGKILL to itself, not to the terminal:
+  # a bare "Killed" line in the middle of a report reads like a crash.
+  ( timeout -k 5 "$secs" docker "$@" >"$OUT" 2>/dev/null ) 2>/dev/null
+}
+
 # Load private strings into an array; they are never printed, only indexed.
 declare -a PRIV=()
 if [ -r "$PRIVATE_STRINGS" ]; then
@@ -89,12 +102,12 @@ done
 # --- 3. filesystem: paths ---------------------------------------------------
 echo
 echo "filesystem paths"
-CID="$(docker create "$IMAGE" true 2>/dev/null)"
+docker_bounded 60 create "$IMAGE" true; CID="$(cat "$OUT")"
 [ -n "$CID" ] || { echo "could not create a container to export" >&2; exit 2; }
-trap 'docker rm -f "$CID" >/dev/null 2>&1' EXIT
+trap 'docker rm -f "$CID" >/dev/null 2>&1; rm -f "$OUT"' EXIT
 
 # Streamed, so this does not need a second copy of the image on disk.
-NAMES="$(docker export "$CID" 2>/dev/null | tar -t 2>/dev/null)"
+NAMES="$(timeout -k 5 300 docker export "$CID" 2>/dev/null | tar -t 2>/dev/null)"
 [ -n "$NAMES" ] || { echo "export produced no entries" >&2; exit 2; }
 echo "  entries scanned: $(printf '%s\n' "$NAMES" | wc -l)"
 
@@ -116,12 +129,13 @@ if [ -z "$CANDIDATES" ]; then
   pass "no .pem/.key files at all"
 else
   N=$(printf '%s\n' "$CANDIDATES" | wc -l)
-  PRIVKEYS="$(printf '%s\n' "$CANDIDATES" | sed 's|^|/|' | tr '\n' ' ' | xargs -r \
-      docker run --rm --network none --entrypoint /bin/sh "$IMAGE" -c \
-      'grep -lE -- "-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----" "$@" 2>/dev/null' sh 2>/dev/null)"
+  FILES="$(printf '%s\n' "$CANDIDATES" | sed 's|^|/|' | tr '\n' ' ')"
+  docker_bounded "$SCAN_TIMEOUT" run --rm --network none --entrypoint /bin/sh "$IMAGE" -c \
+      "grep -lE -- '-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----' $FILES 2>/dev/null"
   RC=$?
-  if [ "$RC" -gt 1 ] && [ -z "$PRIVKEYS" ]; then
-    note "could not read $N .pem/.key files to check them -- INCONCLUSIVE, not clean"
+  PRIVKEYS="$(cat "$OUT")"
+  if [ "$RC" -gt 1 ]; then
+    note "could not read $N .pem/.key files (rc=$RC) -- INCONCLUSIVE, not clean"
   elif [ -n "$PRIVKEYS" ]; then
     while IFS= read -r f; do note "PRIVATE KEY material in image: $f"; done <<< "$PRIVKEYS"
   else
@@ -150,19 +164,18 @@ else
   # A content scan that cannot run is not a content scan that passed. If the
   # image has no shell, say so -- silence here would be the most dangerous
   # possible result, since it looks exactly like a clean bill of health.
-  HITS="$(docker run --rm --network none --entrypoint /bin/sh "$IMAGE" -c \
+  docker_bounded "$SCAN_TIMEOUT" run --rm --network none --entrypoint /bin/sh "$IMAGE" -c \
       "grep -rlEi --binary-files=without-match -- '$PATTERN' \
-         /root /home /etc /opt/ComfyUI 2>/dev/null | head -40" 2>/tmp/scan-err.$$)"
+         /root /home /etc /opt/ComfyUI 2>/dev/null | head -40"
   RC=$?
+  HITS="$(cat "$OUT")"
   if [ "$RC" -gt 1 ]; then
-    note "content scan could not run (no shell in image?) -- result is INCONCLUSIVE, not clean"
-    sed 's/^/          /' /tmp/scan-err.$$ | head -3
+    note "content scan could not run (rc=$RC: no shell, or Docker cannot start containers) -- INCONCLUSIVE, not clean"
   elif [ -n "$HITS" ]; then
     while IFS= read -r f; do note "a private string appears in file contents: $f"; done <<< "$HITS"
   else
     pass "no private strings in /root /home /etc /opt/ComfyUI"
   fi
-  rm -f /tmp/scan-err.$$
 fi
 
 echo
