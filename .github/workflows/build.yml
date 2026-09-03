@@ -55,7 +55,11 @@ jobs:
           chmod 600 ~/.config/comfy-i2v-env/private-strings
           # The secret is optional, and its absence must be loud rather than
           # silent: a skipped check reads exactly like a passed one otherwise.
-          if [ ! -s ~/.config/comfy-i2v-env/private-strings ]; then
+          # Count real entries -- an unset secret still writes a newline, so a
+          # -s test on the file says "set" and the warning never fires.
+          ENTRIES=$(grep -cvE '^[[:space:]]*(#|$)' ~/.config/comfy-i2v-env/private-strings || true)
+          echo "private-string entries available to the scan: $ENTRIES"
+          if [ "$ENTRIES" -eq 0 ]; then
             echo "> **Identity checks skipped** -- the PRIVATE_STRINGS secret is not set." >> "$GITHUB_STEP_SUMMARY"
             echo "> Structural checks (credentials, VCS metadata, shell history) still ran." >> "$GITHUB_STEP_SUMMARY"
           fi

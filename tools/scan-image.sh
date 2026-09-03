@@ -98,15 +98,35 @@ NAMES="$(docker export "$CID" 2>/dev/null | tar -t 2>/dev/null)"
 [ -n "$NAMES" ] || { echo "export produced no entries" >&2; exit 2; }
 echo "  entries scanned: $(printf '%s\n' "$NAMES" | wc -l)"
 
-# .pem and .key are excluded under the system trust store, where they are the
-# point rather than a leak.
 LEAKY="$(printf '%s\n' "$NAMES" \
-  | grep -vE '^(etc/ssl/|usr/share/ca-certificates/|usr/lib/ssl/|opt/venv/lib/.*/(certifi|pip/_vendor)/)' \
-  | grep -E '(^|/)(\.git/|\.git-credentials|\.netrc|\.npmrc|\.pypirc|\.bash_history|\.zsh_history|\.python_history)$|(^|/)\.ssh/|(^|/)\.aws/|(^|/)\.config/gcloud/|(^|/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$|(^|/)authorized_keys$|(^|/)\.docker/config\.json$|huggingface/token$|\.(pem|key|p12|pfx)$')"
+  | grep -E '(^|/)(\.git/|\.git-credentials|\.netrc|\.npmrc|\.pypirc|\.bash_history|\.zsh_history|\.python_history)$|(^|/)\.ssh/|(^|/)\.aws/|(^|/)\.config/gcloud/|(^|/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$|(^|/)authorized_keys$|(^|/)\.docker/config\.json$|huggingface/token$|\.(p12|pfx)$')"
 if [ -n "$LEAKY" ]; then
-  while IFS= read -r p; do note "sensitive path present: /$p"; done <<< "$LEAKY"
+  while IFS= read -r f; do note "sensitive path present: /$f"; done <<< "$LEAKY"
 else
   pass "no credential, history or VCS-metadata paths"
+fi
+
+# .pem and .key are judged by CONTENT, not by extension. Every base image ships
+# public certificates with those suffixes -- trust stores, GnuPG keyring CAs,
+# certifi -- and an extension rule flags all of them while catching nothing that
+# a real leak would not also trip. What actually matters is a private key
+# header, so look for one.
+CANDIDATES="$(printf '%s\n' "$NAMES" | grep -E '\.(pem|key)$' || true)"
+if [ -z "$CANDIDATES" ]; then
+  pass "no .pem/.key files at all"
+else
+  N=$(printf '%s\n' "$CANDIDATES" | wc -l)
+  PRIVKEYS="$(printf '%s\n' "$CANDIDATES" | sed 's|^|/|' | tr '\n' ' ' | xargs -r \
+      docker run --rm --network none --entrypoint /bin/sh "$IMAGE" -c \
+      'grep -lE -- "-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----" "$@" 2>/dev/null' sh 2>/dev/null)"
+  RC=$?
+  if [ "$RC" -gt 1 ] && [ -z "$PRIVKEYS" ]; then
+    note "could not read $N .pem/.key files to check them -- INCONCLUSIVE, not clean"
+  elif [ -n "$PRIVKEYS" ]; then
+    while IFS= read -r f; do note "PRIVATE KEY material in image: $f"; done <<< "$PRIVKEYS"
+  else
+    pass "$N .pem/.key files present, none contain private key material"
+  fi
 fi
 
 for i in "${!PRIV[@]}"; do
